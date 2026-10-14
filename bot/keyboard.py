@@ -36,7 +36,17 @@ def corrections_kb() -> InlineKeyboardMarkup:
 
 def salary_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛵 Добавить смену скаута", callback_data="add_scout_manual")],
         [InlineKeyboardButton(text="🔋 Добавить смену чарджера", callback_data="add_charger")],
+    ])
+
+
+def history_choice_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да", callback_data="history:yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="history:no"),
+        ]
     ])
 
 

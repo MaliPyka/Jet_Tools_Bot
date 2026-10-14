@@ -12,6 +12,7 @@ from bot.group_handlers import group_router
 from db.base import engine, Base
 from db.models import User, Shift
 
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -28,6 +29,8 @@ async def main():
 
     dp.include_router(router)
     dp.include_router(group_router)
+
+
 
     await bot.set_my_commands(
     [BotCommand(command="status", description="Сменить статус: ночной / дневной")],

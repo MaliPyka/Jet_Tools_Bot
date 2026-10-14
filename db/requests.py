@@ -1,12 +1,12 @@
+import re
+from datetime import datetime
 from sqlalchemy import select, update, func
 from sqlalchemy.exc import IntegrityError
-from datetime import datetime
 
 from db.models import User, Shift
 from db.base import async_session
-from core.earnings import calculate_earnings, calculate_touches
-from core.earnings import calculate_charger_earnings
-
+from core.earnings import calculate_earnings, calculate_touches, calculate_charger_earnings
+from core.timeutils import TBILISI
 
 
 async def set_user_name(tg_id: int, name: str) -> None:
@@ -77,7 +77,6 @@ async def set_worker_type(user_id: int, worker_type: str) -> None:
         await session.execute(
             update(User).where(User.id == user_id).values(worker_type=worker_type)
         )
-        # применяем и к текущей незакрытой смене
         await session.execute(
             update(Shift)
             .where(Shift.user_id == user_id, Shift.ended_at.is_(None))
@@ -178,14 +177,55 @@ async def get_period_shifts(user_id: int, start: datetime, end: datetime) -> lis
         return list(result.scalars().all())
 
 
-async def add_charger_shift(user_id: int, swaps: int) -> Shift:
+# ---------- РУЧНОЕ ДОБАВЛЕНИЕ СМЕН (ЗАДНИМ ЧИСЛОМ) ----------
+
+def parse_custom_date(date_str: str | None) -> datetime:
+    created_at = datetime.now(TBILISI).replace(tzinfo=None)
+    if date_str:
+        clean_date = re.sub(r'[,/]', '.', date_str.strip())
+        try:
+            day, month = map(int, clean_date.split("."))
+            created_at = created_at.replace(month=month, day=day)
+        except ValueError:
+            pass
+    return created_at
+
+
+async def add_scout_shift(user_id: int, touches: float, date_str: str = None) -> Shift:
     async with async_session() as session:
+        user = await session.get(User, user_id)
+        worker_type = user.worker_type if user and user.worker_type else "night"
+        
+        created_at = parse_custom_date(date_str)
+        earnings = calculate_earnings(touches, worker_type)
+
+        shift = Shift(
+            user_id=user_id,
+            kind="scout",
+            old_count=touches,  # Сохраняем точное число касаний (float)
+            created_at=created_at,
+            ended_at=created_at,
+            earnings=earnings,
+            worker_type=worker_type,
+        )
+        session.add(shift)
+        await session.commit()
+        await session.refresh(shift)
+        return shift
+
+
+async def add_charger_shift(user_id: int, count: int, date_str: str = None) -> Shift:
+    async with async_session() as session:
+        created_at = parse_custom_date(date_str)
+        earnings = calculate_charger_earnings(count)
+
         shift = Shift(
             user_id=user_id,
             kind="charger",
-            battery_count=swaps,
-            earnings=calculate_charger_earnings(swaps),
-            ended_at=func.now(),  # смена сразу закрытая, на активную смену не влияет
+            battery_count=count,
+            created_at=created_at,
+            ended_at=created_at,
+            earnings=earnings,
         )
         session.add(shift)
         await session.commit()

@@ -1,16 +1,20 @@
+from datetime import datetime, timedelta
+from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram import Router, F, Bot
-from datetime import datetime, timedelta
+
 from core.timeutils import TBILISI, period_dates, to_db_bounds
-from core.report_text import build_period_text
-from db.requests import get_period_shifts, add_charger_shift, set_worker_type
+from core.report_text import build_period_text, build_report_text, build_scooter_reply
+from core.scooter_parser import parse_scooter_report, LINE_RE, get_text
+from core.earnings import calculate_touches
+from bot.middlewares import NameRequiredMiddleware
 
 from db.requests import (
     get_or_create_user,
     set_user_name,
     get_user_by_id,
+    get_user,
     start_shift,
     get_active_shift,
     get_shift,
@@ -20,15 +24,27 @@ from db.requests import (
     add_far,
     add_battery,
     finalize_shift,
+    get_period_shifts,
+    add_charger_shift,
+    add_scout_shift,
+    set_worker_type,
 )
-from bot.keyboard import main_kb, zones_kb, final_report_kb, corrections_kb, salary_kb, worker_type_kb
-from bot.states import StartStates, ReportStates, ChargerStates
-from core.scooter_parser import parse_scooter_report, LINE_RE
-from core.report_text import build_report_text, build_scooter_reply
-from core.earnings import calculate_touches
+from bot.keyboard import (
+    main_kb,
+    zones_kb,
+    final_report_kb,
+    corrections_kb,
+    salary_kb,
+    worker_type_kb,
+    history_choice_kb,
+)
+from bot.states import StartStates, ReportStates, ChargerStates, ScoutStates
 
 router = Router()
 router.message.filter(F.chat.type == "private")
+
+router.message.middleware(NameRequiredMiddleware())
+router.callback_query.middleware(NameRequiredMiddleware())
 
 
 def report_kb() -> InlineKeyboardMarkup:
@@ -41,28 +57,46 @@ def report_kb() -> InlineKeyboardMarkup:
     ])
 
 
-# ---------- старт ----------
+# ---------- Старт и регистрация ----------
 
 @router.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
-    user, created = await get_or_create_user(message.from_user.id)
+    await message.answer(f"С возвращением, {user.name}!", reply_markup=main_kb)
 
-    if created or not user.name:
-        await state.set_state(StartStates.waiting_name)
-        await message.answer("Напиши своё имя (оно будет в отчётах)")
-        return
 
-    await message.answer(f"С возвращением", reply_markup=main_kb)
+BUTTON_TEXTS = {"🟢 Начать смену", "📋 Составить отчёт", "💰 Зп"}  # тексты своих кнопок
 
 
 @router.message(StartStates.waiting_name)
 async def save_name_handler(message: Message, state: FSMContext):
-    await set_user_name(message.from_user.id, message.text.strip())
+    name = (message.text or "").strip()
+
+    if not name or len(name) > 40 or name.startswith("/") or name in BUTTON_TEXTS:
+        await message.answer("Напиши своё имя текстом, например: Имя Фамилия")
+        return
+
+    await set_user_name(message.from_user.id, name)
     await state.clear()
-    await message.answer(f"Чтобы бот начал считать касания - начни смену", reply_markup=main_kb)
+    await message.answer("Теперь можешь начинать смену.", reply_markup=main_kb)
 
 
-# ---------- смена ----------
+@router.callback_query(StartStates.waiting_history_choice, F.data.startswith("history:"))
+async def history_choice_handler(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    await state.clear()
+    
+    if choice == "yes":
+        await callback.message.edit_text(
+            "Отлично! Добавить прошедшие смены можно в разделе **«💰 Зп»** через кнопки внизу."
+        )
+    else:
+        await callback.message.edit_text("Хорошо, начнем с чистого листа!")
+
+    await callback.message.answer("Главное меню:", reply_markup=main_kb)
+    await callback.answer()
+
+
+# ---------- Смена ----------
 
 @router.message(F.text == "🟢 Начать смену")
 async def start_shift_handler(message: Message):
@@ -77,22 +111,22 @@ async def start_shift_handler(message: Message):
     await message.answer("Смена начата")
 
 
-# ---------- парсинг списков самокатов ----------
+# ---------- Парсинг списков самокатов ----------
 
 def is_scooter_report(message: Message) -> bool:
-    return bool(message.text) and bool(LINE_RE.search(message.text))
+    return bool(LINE_RE.search(get_text(message)))
 
 
 @router.message(is_scooter_report)
-async def scooter_report_handler(message: Message):
-    user, _ = await get_or_create_user(message.from_user.id)
+async def scooter_report_handler(message: Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
 
     active = await get_active_shift(user.id)
     if not active:
         await message.answer("Нет активной смены. Сначала начни смену")
         return
 
-    old, new, unknown = parse_scooter_report(message.text)
+    old, new, unknown = parse_scooter_report(message)
 
     if old == 0 and new == 0:
         await message.answer("Не нашёл ни одного самоката в сообщении")
@@ -112,8 +146,7 @@ def is_txt_document(message: Message) -> bool:
 
 
 @router.message(is_txt_document)
-async def scooter_report_file_handler(message: Message, bot: Bot):
-    user, _ = await get_or_create_user(message.from_user.id)
+async def scooter_report_file_handler(message: Message, bot: Bot, state: FSMContext):
 
     active = await get_active_shift(user.id)
     if not active:
@@ -136,7 +169,7 @@ async def scooter_report_file_handler(message: Message, bot: Bot):
     await message.answer(build_scooter_reply(old, new, updated, unknown))
 
 
-# ---------- составление отчёта ----------
+# ---------- Составление отчёта ----------
 
 @router.message(F.text == "📋 Составить отчёт")
 async def compose_report_start(message: Message, state: FSMContext):
@@ -177,8 +210,10 @@ async def finish_corrections(bot: Bot, state: FSMContext, count: int) -> None:
 
     shift = await get_shift(shift_id)
     user = await get_user_by_id(shift.user_id)
+    user_name = user.name if user and user.name else "Скаут"
+
     await bot.edit_message_text(
-        text=build_report_text(shift, user.name),
+        text=build_report_text(shift, user_name),
         chat_id=data["corr_chat_id"],
         message_id=data["corr_msg_id"],
         reply_markup=report_kb(),
@@ -198,12 +233,12 @@ async def corrections_text(message: Message, state: FSMContext, bot: Bot):
         return
 
     await finish_corrections(bot, state, int(message.text))
-    await message.delete()  # убираем введённое число, чтобы не засорять чат
+    await message.delete()
 
 
 @router.callback_query(F.data == "add_far")
 async def add_far_start(callback: CallbackQuery, state: FSMContext):
-    user, _ = await get_or_create_user(callback.from_user.id)
+
     active = await get_active_shift(user.id)
 
     if not active:
@@ -234,7 +269,8 @@ async def add_far_finish(message: Message, state: FSMContext, bot: Bot):
 
     shift = await get_shift(shift_id)
     user = await get_user_by_id(shift.user_id)
-    text = build_report_text(shift, user.name)
+    user_name = user.name if user and user.name else "Скаут"
+    text = build_report_text(shift, user_name)
 
     await bot.edit_message_text(
         text=text,
@@ -247,7 +283,7 @@ async def add_far_finish(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == "add_battery")
 async def add_battery_start(callback: CallbackQuery, state: FSMContext):
-    user, _ = await get_or_create_user(callback.from_user.id)
+
     active = await get_active_shift(user.id)
 
     if not active:
@@ -278,7 +314,8 @@ async def add_battery_finish(message: Message, state: FSMContext, bot: Bot):
 
     shift = await get_shift(shift_id)
     user = await get_user_by_id(shift.user_id)
-    text = build_report_text(shift, user.name)
+    user_name = user.name if user and user.name else "Скаут"
+    text = build_report_text(shift, user_name)
 
     await bot.edit_message_text(
         text=text,
@@ -287,6 +324,7 @@ async def add_battery_finish(message: Message, state: FSMContext, bot: Bot):
         reply_markup=report_kb(),
     )
     await message.delete()
+
 
 @router.callback_query(F.data == "finish_shift")
 async def finish_shift_handler(callback: CallbackQuery):
@@ -355,10 +393,14 @@ async def worker_type_change(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data == "add_charger")
-async def add_charger_start(callback: CallbackQuery, state: FSMContext):
-    prompt = await callback.message.answer("Сколько замен АКБ было за смену? (число)")
-    await state.set_state(ChargerStates.waiting_swaps)
+# ---------- Ручное добавление прошлых смен (Скаут и Чарджер) ----------
+
+# --- Скаут ---
+
+@router.callback_query(F.data == "add_scout_manual")
+async def add_scout_start(callback: CallbackQuery, state: FSMContext):
+    prompt = await callback.message.answer("За какое число смена? (например: 12.10 или 14,10)")
+    await state.set_state(ScoutStates.waiting_date)
     await state.update_data(
         salary_chat_id=callback.message.chat.id,
         salary_msg_id=callback.message.message_id,
@@ -367,23 +409,156 @@ async def add_charger_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(ChargerStates.waiting_swaps)
-async def add_charger_finish(message: Message, state: FSMContext, bot: Bot):
-    if not message.text or not message.text.isdigit() or int(message.text) == 0:
-        await message.answer("Нужно число больше нуля, попробуй ещё раз.")
+@router.message(ScoutStates.waiting_date)
+async def add_scout_date(message: Message, state: FSMContext, bot: Bot):
+    date_text = message.text.strip()
+    data = await state.get_data()
+
+    if "prompt_id" in data:
+        try:
+            await bot.delete_message(message.chat.id, data["prompt_id"])
+        except Exception:
+            pass
+
+    prompt2 = await message.answer(f"Принято ({date_text}). Сколько касаний было за смену? (можно дробное, например: 158.5 или 158,5)")
+    
+    await state.update_data(
+        shift_date=date_text,
+        prompt_id=prompt2.message_id,
+    )
+    await state.set_state(ScoutStates.waiting_touches)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.message(ScoutStates.waiting_touches)
+async def add_scout_finish(message: Message, state: FSMContext, bot: Bot):
+    raw_text = message.text.strip().replace(",", ".")
+    
+    try:
+        touches = float(raw_text)
+        if touches <= 0:
+            raise ValueError
+    except ValueError:
+        err = await message.answer("Нужно число больше нуля, попробуй ещё раз.")
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
 
     data = await state.get_data()
     await state.clear()
 
-    user, _ = await get_or_create_user(message.from_user.id)
-    await add_charger_shift(user.id, int(message.text))
+    shift_date = data.get("shift_date")
 
-    await bot.edit_message_text(
-        text=await render_salary(user.id),
-        chat_id=data["salary_chat_id"],
-        message_id=data["salary_msg_id"],
-        reply_markup=salary_kb(),
+    # Используем твою функцию get_user из database/requests
+    user = await get_user(message.from_user.id)
+    if not user:
+        return
+
+    await add_scout_shift(user.id, touches=touches, date_str=shift_date)
+
+    try:
+        await bot.edit_message_text(
+            text=await render_salary(user.id),
+            chat_id=data["salary_chat_id"],
+            message_id=data["salary_msg_id"],
+            reply_markup=salary_kb(),
+        )
+    except Exception:
+        pass
+
+    if "prompt_id" in data:
+        try:
+            await bot.delete_message(message.chat.id, data["prompt_id"])
+        except Exception:
+            pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+# --- Чарджер ---
+
+@router.callback_query(F.data == "add_charger")
+async def add_charger_start(callback: CallbackQuery, state: FSMContext):
+    prompt = await callback.message.answer("За какое число смена? (например: 12.10 или 14,10)")
+    await state.set_state(ChargerStates.waiting_date)
+    await state.update_data(
+        salary_chat_id=callback.message.chat.id,
+        salary_msg_id=callback.message.message_id,
+        prompt_id=prompt.message_id,
     )
-    await bot.delete_message(message.chat.id, data["prompt_id"])
-    await message.delete()
+    await callback.answer()
+
+
+@router.message(ChargerStates.waiting_date)
+async def add_charger_date(message: Message, state: FSMContext, bot: Bot):
+    date_text = message.text.strip()
+    data = await state.get_data()
+
+    if "prompt_id" in data:
+        try:
+            await bot.delete_message(message.chat.id, data["prompt_id"])
+        except Exception:
+            pass
+
+    prompt2 = await message.answer(f"Принято ({date_text}). Сколько замен АКБ было за смену? (число)")
+    
+    await state.update_data(
+        shift_date=date_text,
+        prompt_id=prompt2.message_id,
+    )
+    await state.set_state(ChargerStates.waiting_swaps)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.message(ChargerStates.waiting_swaps)
+async def add_charger_finish(message: Message, state: FSMContext, bot: Bot):
+    if not message.text or not message.text.isdigit() or int(message.text) == 0:
+        await message.answer("Нужно целое число больше нуля, попробуй ещё раз.")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    shift_date = data.get("shift_date")
+    swaps = int(message.text)
+
+
+    user = await get_user(message.from_user.id)
+    if not user:
+        return
+
+    await add_charger_shift(user.id, count=swaps, date_str=shift_date)
+
+    try:
+        await bot.edit_message_text(
+            text=await render_salary(user.id),
+            chat_id=data["salary_chat_id"],
+            message_id=data["salary_msg_id"],
+            reply_markup=salary_kb(),
+        )
+    except Exception:
+        pass
+
+    if "prompt_id" in data:
+        try:
+            await bot.delete_message(message.chat.id, data["prompt_id"])
+        except Exception:
+            pass
+    try:
+        await message.delete()
+    except Exception:
+        pass

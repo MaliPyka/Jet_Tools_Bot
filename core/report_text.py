@@ -1,5 +1,4 @@
 from datetime import timedelta
-
 from db.models import Shift
 from core.earnings import calculate_touches, calculate_earnings
 from core.pluralize import pluralize
@@ -7,13 +6,13 @@ from core.timeutils import to_local
 
 
 def fmt_num(x: float) -> str:
-    return f"{x:g}".replace(".", ",")  # 21.0 -> "21", 21.25 -> "21,25"
+    return f"{x:g}".replace(".", ",")
 
 
 def build_report_text(shift: Shift, user_name: str, final: bool = False) -> str:
     lines = [
         f"Смена {to_local(shift.created_at).strftime('%d.%m')}",
-        user_name,
+        user_name or "Скаут",
         f"Зона {shift.zone}",
         f"🔀: {shift.old_count}",
         f"🆕🔀: {shift.new_count}",
@@ -30,14 +29,11 @@ def build_report_text(shift: Shift, user_name: str, final: bool = False) -> str:
         shift.old_count, shift.new_count, shift.corrections_count,
         shift.far_count, shift.battery_count,
     )
-    earnings = calculate_earnings(touches, shift.worker_type)
 
-    touches_text = round(touches) if final else fmt_num(touches)  # финал целым, предварительный как есть
-
+    touches_text = round(touches) if final else fmt_num(touches)
     lines.append(f"Касаний: {touches_text}")
-    #lines.append(f"{earnings} лари")
 
-    return "\n".join(lines)
+    return "\n".join(str(line) for line in lines if line is not None)
 
 
 def build_scooter_reply(old: int, new: int, updated_shift: Shift, unknown: list[str]) -> str:
@@ -74,7 +70,7 @@ def build_period_text(start, end, shifts) -> str:
             lines.append(f"{date} · 🔋{s.battery_count} · {earn} лари")
         else:
             t = calculate_touches(s.old_count, s.new_count, s.corrections_count, s.far_count, s.battery_count)
-            lines.append(f"{date} · ⚡{round(t)} · {earn} лари")
+            lines.append(f"{date} · ⚡{fmt_num(t)} · {earn} лари")
 
     total_money = sum(s.earnings or 0 for s in shifts)
     return (

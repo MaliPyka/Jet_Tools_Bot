@@ -18,9 +18,18 @@ def classify(model: str) -> tuple[str, bool]:
     return "old", False
 
 
-def parse_scooter_report(text: str) -> tuple[int, int, list[str]]:
+def get_text(message) -> str:
+    return message.text or message.caption or ""
+
+
+def parse_scooter_report(message_or_text) -> tuple[int, int, list[str]]:
     old = new = 0
     unknown = []
+
+    if hasattr(message_or_text, "text") or hasattr(message_or_text, "caption"):
+        text = get_text(message_or_text)
+    else:
+        text = str(message_or_text)
 
     for match in LINE_RE.finditer(text):
         model = match.group(1).strip()

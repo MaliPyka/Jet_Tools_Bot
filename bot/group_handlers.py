@@ -2,9 +2,9 @@ from aiogram import Router, Bot, F
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import Message, ReactionTypeEmoji
 
-from core.scooter_parser import parse_scooter_report, LINE_RE
+from core.scooter_parser import parse_scooter_report, LINE_RE, get_text
 from core.report_text import build_scooter_reply
-from db.requests import get_user, get_active_shift, add_touches
+from db.requests import get_or_create_user, get_active_shift, add_touches
 
 group_router = Router()
 group_router.message.filter(F.chat.type.in_({"group", "supergroup"}))
@@ -14,16 +14,22 @@ async def dm(bot: Bot, chat_id: int, text: str) -> None:
     try:
         await bot.send_message(chat_id, text)
     except TelegramForbiddenError:
-        pass  # человек заблокировал бота
+        pass
 
 
 async def process_list(message: Message, bot: Bot, text: str) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
 
-    user = await get_user(message.from_user.id)
-    if user is None or not user.name:
-        return  # не зарегистрирован в боте, молча игнорируем
+    user, created = await get_or_create_user(message.from_user.id)
+
+    if created or not user.name:
+        await dm(
+            bot, message.from_user.id,
+            "⚠️ Твоего профиля нет в базе (или данные были сброшены).\n\n"
+            "Перейди в диалог со мной и напиши своё имя, чтобы отчёты из группы засчитывались!"
+        )
+        return
 
     old, new, unknown = parse_scooter_report(text)
     if old == 0 and new == 0:
@@ -44,13 +50,13 @@ async def process_list(message: Message, bot: Bot, text: str) -> None:
     await dm(bot, user.tg_id, build_scooter_reply(old, new, updated, unknown))
 
     try:
-        await message.react([ReactionTypeEmoji(emoji="👍")])  # видно, какой список засчитан
+        await message.react([ReactionTypeEmoji(emoji="👍")])
     except TelegramBadRequest:
         pass
 
 
 def has_scooter_lines(message: Message) -> bool:
-    return bool(message.text) and bool(LINE_RE.search(message.text))
+    return bool(LINE_RE.search(get_text(message)))
 
 
 def is_txt_document(message: Message) -> bool:
@@ -61,7 +67,7 @@ def is_txt_document(message: Message) -> bool:
 
 @group_router.message(has_scooter_lines)
 async def group_text_handler(message: Message, bot: Bot):
-    await process_list(message, bot, message.text)
+    await process_list(message, bot, get_text(message))
 
 
 @group_router.message(is_txt_document)
