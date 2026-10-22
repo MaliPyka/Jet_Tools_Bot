@@ -3,12 +3,14 @@ from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 from core.timeutils import TBILISI, period_dates, to_db_bounds
 from core.report_text import build_period_text, build_report_text, build_scooter_reply
 from core.scooter_parser import parse_scooter_report, LINE_RE, get_text
 from core.earnings import calculate_touches
 from bot.middlewares import NameRequiredMiddleware
+
 
 from db.requests import (
     get_or_create_user,
@@ -236,9 +238,17 @@ async def corrections_text(message: Message, state: FSMContext, bot: Bot):
     await message.delete()
 
 
+async def delete_quietly(bot: Bot, chat_id: int, message_id: int | None) -> None:
+    if message_id is None:
+        return
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except TelegramBadRequest:
+        pass
+
+
 @router.callback_query(F.data == "add_far")
 async def add_far_start(callback: CallbackQuery, state: FSMContext):
-    # Ищем пользователя по Telegram ID и сразу проверяем активную смену
     user = await get_user(callback.from_user.id)
     if not user:
         await callback.answer("Сначала зарегистрируйся (/start)")
@@ -249,13 +259,14 @@ async def add_far_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Смена уже завершена или не начата")
         return
 
+    prompt = await callback.message.answer("Сколько дальних самокатов?")
     await state.update_data(
         shift_id=active.id,
         report_chat_id=callback.message.chat.id,
         report_message_id=callback.message.message_id,
+        prompt_id=prompt.message_id,
     )
     await state.set_state(ReportStates.waiting_far)
-    await callback.message.answer("Сколько дальних самокатов?")
     await callback.answer()
 
 
@@ -283,18 +294,15 @@ async def add_far_finish(message: Message, state: FSMContext, bot: Bot):
             message_id=data["report_message_id"],
             reply_markup=report_kb(),
         )
-    except Exception:
-        pass
-        
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    except TelegramBadRequest:
+        pass  # отчёт не изменился
+
+    await delete_quietly(bot, message.chat.id, data.get("prompt_id"))  # вопрос бота
+    await delete_quietly(bot, message.chat.id, message.message_id)     # ответ пользователя
 
 
 @router.callback_query(F.data == "add_battery")
 async def add_battery_start(callback: CallbackQuery, state: FSMContext):
-    # Исправлено: получаем юзера и его активную смену
     user = await get_user(callback.from_user.id)
     if not user:
         await callback.answer("Сначала зарегистрируйся (/start)")
@@ -305,13 +313,14 @@ async def add_battery_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Смена уже завершена или не начата.")
         return
 
+    prompt = await callback.message.answer("Сколько замен АКБ?")
     await state.update_data(
         shift_id=active.id,
         report_chat_id=callback.message.chat.id,
         report_message_id=callback.message.message_id,
+        prompt_id=prompt.message_id,
     )
     await state.set_state(ReportStates.waiting_battery)
-    await callback.message.answer("Сколько замен АКБ?")
     await callback.answer()
 
 
@@ -339,13 +348,11 @@ async def add_battery_finish(message: Message, state: FSMContext, bot: Bot):
             message_id=data["report_message_id"],
             reply_markup=report_kb(),
         )
-    except Exception:
-        pass
-        
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    except TelegramBadRequest:
+        pass  # отчёт не изменился
+
+    await delete_quietly(bot, message.chat.id, data.get("prompt_id"))
+    await delete_quietly(bot, message.chat.id, message.message_id)     
 
 
 @router.callback_query(F.data == "finish_shift")
