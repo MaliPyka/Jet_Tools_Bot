@@ -238,11 +238,15 @@ async def corrections_text(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == "add_far")
 async def add_far_start(callback: CallbackQuery, state: FSMContext):
+    # Ищем пользователя по Telegram ID и сразу проверяем активную смену
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала зарегистрируйся (/start)")
+        return
 
     active = await get_active_shift(user.id)
-
     if not active:
-        await callback.answer("Смена уже завершена")
+        await callback.answer("Смена уже завершена или не начата")
         return
 
     await state.update_data(
@@ -257,7 +261,7 @@ async def add_far_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(ReportStates.waiting_far)
 async def add_far_finish(message: Message, state: FSMContext, bot: Bot):
-    if not message.text.isdigit():
+    if not message.text or not message.text.isdigit():
         await message.answer("Нужно число, попробуй ещё раз")
         return
 
@@ -272,22 +276,33 @@ async def add_far_finish(message: Message, state: FSMContext, bot: Bot):
     user_name = user.name if user and user.name else "Скаут"
     text = build_report_text(shift, user_name)
 
-    await bot.edit_message_text(
-        text=text,
-        chat_id=data["report_chat_id"],
-        message_id=data["report_message_id"],
-        reply_markup=report_kb(),
-    )
-    await message.delete()
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=data["report_chat_id"],
+            message_id=data["report_message_id"],
+            reply_markup=report_kb(),
+        )
+    except Exception:
+        pass
+        
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "add_battery")
 async def add_battery_start(callback: CallbackQuery, state: FSMContext):
+    # Исправлено: получаем юзера и его активную смену
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала зарегистрируйся (/start)")
+        return
 
     active = await get_active_shift(user.id)
-
     if not active:
-        await callback.answer("Смена уже завершена.")
+        await callback.answer("Смена уже завершена или не начата.")
         return
 
     await state.update_data(
@@ -302,7 +317,7 @@ async def add_battery_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(ReportStates.waiting_battery)
 async def add_battery_finish(message: Message, state: FSMContext, bot: Bot):
-    if not message.text.isdigit():
+    if not message.text or not message.text.isdigit():
         await message.answer("Нужно число, попробуй ещё раз")
         return
 
@@ -317,13 +332,20 @@ async def add_battery_finish(message: Message, state: FSMContext, bot: Bot):
     user_name = user.name if user and user.name else "Скаут"
     text = build_report_text(shift, user_name)
 
-    await bot.edit_message_text(
-        text=text,
-        chat_id=data["report_chat_id"],
-        message_id=data["report_message_id"],
-        reply_markup=report_kb(),
-    )
-    await message.delete()
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=data["report_chat_id"],
+            message_id=data["report_message_id"],
+            reply_markup=report_kb(),
+        )
+    except Exception:
+        pass
+        
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "finish_shift")
