@@ -49,10 +49,6 @@ async def process_list(message: Message, bot: Bot, text: str) -> None:
 
     await dm(bot, user.tg_id, build_scooter_reply(old, new, updated, unknown))
 
-    try:
-        await message.react([ReactionTypeEmoji(emoji="👍")])
-    except TelegramBadRequest:
-        pass
 
 
 def has_scooter_lines(message: Message) -> bool:
